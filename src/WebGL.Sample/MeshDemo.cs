@@ -1,11 +1,11 @@
 using System;
 using System.Diagnostics;
+using System.IO;
 using System.Net.Http;
 using System.Numerics;
+using System.Reflection;
 using System.Runtime.InteropServices;
 using System.Threading.Tasks;
-
-using CoroutineScheduler;
 
 using Silk.NET.OpenGLES;
 
@@ -22,33 +22,11 @@ public struct VertexShaderInput
 public class MeshDemo
 {
 	private GL Gl { get; }
-	private Scheduler Scheduler { get; }
-	
-	private static async Task<string> DownloadFile(
-		HttpClient client,
-		string path)
+
+	public static async Task<MeshDemo> LoadAsync(GL gl)
 	{
-		var response = await client.GetAsync(new Uri(path, UriKind.Relative));
-		if (!response.IsSuccessStatusCode)
-			throw new Exception();
-		return await response.Content.ReadAsStringAsync();
-	}
-
-	public static async Task<MeshDemo> LoadAsync(GL gl, Uri baseAddress)
-	{
-		var client = new HttpClient()
-		{
-			BaseAddress = baseAddress,
-		};
-
-		var vertResponseTask = DownloadFile(client, "Assets/Vert.glsl");
-		var fragResponseTask = DownloadFile(client, "Assets/Frag.glsl");
-
-		await Task.WhenAll(vertResponseTask, fragResponseTask);
-
-		var vertSource = await vertResponseTask;
-		var fragSource = await fragResponseTask;
-
+		var vertSource = new StreamReader(typeof(MeshDemo).GetTypeInfo().Assembly.GetManifestResourceStream("WebGL.Sample.Assets.Vert.glsl")).ReadToEnd();
+		var fragSource = new StreamReader(typeof(MeshDemo).GetTypeInfo().Assembly.GetManifestResourceStream("WebGL.Sample.Assets.Frag.glsl")).ReadToEnd();
 		return new MeshDemo(gl, vertSource, fragSource);
 	}
 
@@ -70,8 +48,8 @@ public class MeshDemo
 		string fragmentSource)
 	{
 		Gl = gl;
-		Scheduler = new();
-		_ = Scheduler.SpawnTask(LogicThread);
+
+		Task.Run(LogicThread);
 
 		// setup the vertex buffer to draw
 		VertexBuffer = new VertexShaderInput[MeshData.TriangleVerts.Length];
@@ -97,7 +75,7 @@ public class MeshDemo
 		gl.AttachShader(ShaderProgram, VertexShader);
 		gl.AttachShader(ShaderProgram, FragmentShader);
 		gl.LinkProgram(ShaderProgram);
-		
+
 		gl.GetProgram(ShaderProgram, ProgramPropertyARB.LinkStatus, out res);
 		//gl.GetProgramInfoLog(ShaderProgram, out log);
 		Debug.Assert(res != 0);
@@ -171,7 +149,6 @@ public class MeshDemo
 	public unsafe void Render()
 	{
 		// iterate our logic thread
-		Scheduler.Resume();
 
 		// update the vertex buffer
 		var modelMatrix =
@@ -217,7 +194,6 @@ public class MeshDemo
 		for (int i = 0; i < count; i++)
 		{
 			LogoTranslation += deltaPerFrame;
-			await Scheduler.Yield();
 		}
 		LogoTranslation = position;
 	}

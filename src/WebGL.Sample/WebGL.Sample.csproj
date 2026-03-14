@@ -9,19 +9,23 @@
     <IsAotCompatible>true</IsAotCompatible>
     <NoWarn>$(NoWarn);RCS1090</NoWarn>
     <InvariantGlobalization>true</InvariantGlobalization>
-    <EmccFlags>-s FULL_ES3=1 -lopenal -lGL -s</EmccFlags>
+    <InvariantTimezone>true</InvariantTimezone>
+    <EmccFlags>-s FULL_ES3=1 -lopenal -lGL -s USE_PTHREADS=1 -s OFFSCREENCANVAS_SUPPORT=1 -s OFFSCREENCANVASES_TO_PTHREAD=#canvas -s OFFSCREEN_FRAMEBUFFER=1 -lopfs.js -s WASMFS -s FORCE_FILESYSTEM</EmccFlags>
     <WasmMainJSPath>main.js</WasmMainJSPath>
   </PropertyGroup>
-  
+
   <PropertyGroup>
+    <Optimize>true</Optimize>
     <PublishTrimmed>true</PublishTrimmed>
+    <TrimMode>full</TrimMode>
+    <TrimmerRemoveSymbols>true</TrimmerRemoveSymbols>
     <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
     <WasmBuildNative>true</WasmBuildNative>
     <RunAOTCompilation>true</RunAOTCompilation>
-    <!-- Disable SIMD support as it's prerelease only on Safari -->
-    <WasmEnableSIMD>false</WasmEnableSIMD>
+    <WasmEnableSIMD>true</WasmEnableSIMD>
     <!-- Normal,JustInterp,Full,FullInterp,Hybrid,LLVMOnly,LLVMOnlyInterp -->
     <!-- <AOTMode>LLVMOnly</AOTMode> -->
+    <WasmEnableThreads>true</WasmEnableThreads>
   </PropertyGroup>
 
   <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Debug|AnyCPU'">
@@ -31,6 +35,9 @@
   <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Release|AnyCPU'">
     <DebugType>none</DebugType>
     <DebugSymbols>false</DebugSymbols>
+    <DebuggerSupport>false</DebuggerSupport>
+    <WasmEnableExceptionHandling>false</WasmEnableExceptionHandling>
+    <WasmStripILAfterAOT>true</WasmStripILAfterAOT>
   </PropertyGroup>
 
   <ItemGroup>
@@ -40,14 +47,30 @@
 
     <WasmExtraFilesToDeploy Include="index.html" />
     <WasmExtraFilesToDeploy Include="main.js" />
-    <WasmExtraFilesToDeploy Include="$(MSBuildThisFileDirectory)Assets\**" TargetPath="Assets/%(RecursiveDir)%(Filename)%(Extension)" />
+
+    <EmbeddedResource Include="Assets\Frag.glsl" Link="Assets\Frag.glsl" />
+    <EmbeddedResource Include="Assets\Vert.glsl" Link="Assets\Vert.glsl" />
   </ItemGroup>
 
   <ItemGroup>
-    <PackageReference Include="CoroutineScheduler" Version="0.5.1" />
     <PackageReference Include="Verlite.MsBuild" Version="2.7.0" PrivateAssets="All" />
     <PackageReference Include="Silk.NET.OpenGLES" Version="2.23.0" />
-    
     <TrimmableAssembly Include="Silk.NET.Maths" Version="2.23.0" />
   </ItemGroup>
+  <UsingTask TaskName="PatchJsTask" TaskFactory="RoslynCodeTaskFactory" AssemblyFile="$(MSBuildToolsPath)\Microsoft.Build.Tasks.Core.dll">
+    <ParameterGroup>
+      <DotnetNativePath ParameterType="System.String" Required="true" />
+      <DotnetNativeWorkerPath ParameterType="System.String" Required="true" />
+    </ParameterGroup>
+    <Task>
+      <Using Namespace="System.IO" />
+      <Using Namespace="System.Text" />
+      <Using Namespace="System.Collections.Generic" />
+      <Code Type="Fragment" Language="cs" Source="$(MSBuildProjectDirectory)\PatchJs.csx" />
+    </Task>
+  </UsingTask>
+  <Target Name="PatchJs" AfterTargets="_WasmGenerateAppBundle">
+    <PatchJsTask DotnetNativePath="$(TargetDir)AppBundle\_framework\dotnet.native.js" DotnetNativeWorkerPath="$(TargetDir)AppBundle\_framework\dotnet.native.worker.mjs" />
+    <Message Text="Patched dotnet.native.js and dotnet.native.worker.mjs" Importance="high" />
+  </Target>
 </Project>

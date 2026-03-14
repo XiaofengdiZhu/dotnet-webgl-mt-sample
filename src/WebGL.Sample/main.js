@@ -1,16 +1,18 @@
 import { dotnet } from './_framework/dotnet.js'
 
+var canvas = globalThis.document.getElementById("canvas");
+canvas.width = 1000;
+canvas.height = 1000;
+
 const { setModuleImports, getAssemblyExports, getConfig, runMain } = await dotnet
 	.withDiagnosticTracing(false)
 	.withApplicationArgumentsFromQuery()
+	.withModuleConfig({canvas: canvas})
 	.create();
 
 const config = getConfig();
 const exports = await getAssemblyExports(config.mainAssemblyName);
 const interop = exports.WebGL.Sample.Interop;
-
-var canvas = globalThis.document.getElementById("canvas");
-dotnet.instance.Module["canvas"] = canvas;
 
 setModuleImports("main.js", {
 	initialize: () => {
@@ -21,13 +23,13 @@ setModuleImports("main.js", {
 			var displayHeight = canvas.clientHeight * devicePixelRatio;
 
 			if (canvas.width != displayWidth || canvas.height != displayHeight) {
-				canvas.width = displayWidth;
-				canvas.height = displayHeight;
+				//canvas.width = displayWidth;
+				//canvas.height = displayHeight;
 				dispatch = true;
 			}
 
-			if (dispatch)
-				interop.OnCanvasResize(displayWidth, displayHeight, devicePixelRatio);
+			//if (dispatch)
+				//interop.OnCanvasResize(displayWidth, displayHeight, devicePixelRatio);
 		}
 
 		function checkCanvasResizeFrame() {
@@ -35,7 +37,7 @@ setModuleImports("main.js", {
 			requestAnimationFrame(checkCanvasResizeFrame);
 		}
 
-		var keyDown = (e) => {
+		/*var keyDown = (e) => {
 			e.stopPropagation();
 			var shift = e.shiftKey;
 			var ctrl = e.ctrlKey;
@@ -139,19 +141,19 @@ setModuleImports("main.js", {
 		canvas.addEventListener("mouseup", mouseUp, false);
 		canvas.addEventListener("touchstart", touchStart, false);
 		canvas.addEventListener("touchmove", touchMove, false);
-		canvas.addEventListener("touchend", touchEnd, false);
+		canvas.addEventListener("touchend", touchEnd, false);*/
 		checkCanvasResize(true);
 		checkCanvasResizeFrame();
 
 		canvas.tabIndex = 1000;
 
-		interop.SetRootUri(window.location.toString());
+		//interop.SetRootUri(window.location.toString());
 
-		var langs = navigator.languages || [];
+		/*var langs = navigator.languages || [];
 		for (var i = 0; i < langs.length; i++)
 			interop.AddLocale(langs[i]);
 		interop.AddLocale(navigator.language);
-		interop.AddLocale(navigator.userLanguage);
+		interop.AddLocale(navigator.userLanguage);*/
 	}
 });
 

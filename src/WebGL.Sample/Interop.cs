@@ -1,5 +1,6 @@
 using System;
 using System.Runtime.InteropServices.JavaScript;
+using System.Threading.Tasks;
 
 using Silk.NET.OpenGLES;
 
@@ -36,13 +37,13 @@ internal static partial class Interop
 	}
 
 	[JSExport]
-	public static void OnCanvasResize(float width, float height, float devicePixelRatio)
+	public static async Task OnCanvasResize(float width, float height, float devicePixelRatio)
 	{
 		Test.CanvasResized((int)width, (int)height);
 	}
 
 	[JSExport]
-	public static void SetRootUri(string uri)
+	public static async Task SetRootUri(string uri)
 	{
 		Test.BaseAddress = new Uri(uri);
 	}

@@ -88,13 +88,13 @@ public static class Test
 		var gl = GL.GetApi(EGL.GetProcAddress);
 
 		Interop.Initialize();
-		ArgumentNullException.ThrowIfNull(BaseAddress);
 
-		Demo = await MeshDemo.LoadAsync(gl, BaseAddress);
-		Demo?.CanvasResized(CanvasWidth, CanvasHeight);
+		Demo = await MeshDemo.LoadAsync(gl);
+		Demo?.CanvasResized(1000, 1000);
 
 		unsafe
 		{
+			Console.WriteLine("RequestAnimationFrameLoop");
 			Emscripten.RequestAnimationFrameLoop((delegate* unmanaged<double, nint, int>)&Frame, nint.Zero);
 		}
 	}
