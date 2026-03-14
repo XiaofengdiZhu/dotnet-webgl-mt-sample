@@ -1181,7 +1181,7 @@ internal unsafe static class TrampolineFuncs
 	[UnmanagedFunctionPointer(CallingConvention.Cdecl)]
 	private delegate void glNamedBufferStorage_t(uint buffer, int size, void* data, uint flags);
 	[UnmanagedFunctionPointer(CallingConvention.Cdecl)]
-	private delegate void glNamedBufferData_t(uint buffer, int size, void* data, VertexBufferObjectUsage usage);
+	private delegate void glNamedBufferData_t(uint buffer, int size, void* data, BufferUsageARB usage);
 	[UnmanagedFunctionPointer(CallingConvention.Cdecl)]
 	private delegate void glNamedBufferSubData_t(uint buffer, IntPtr offset, int size, void* data);
 	[UnmanagedFunctionPointer(CallingConvention.Cdecl)]
