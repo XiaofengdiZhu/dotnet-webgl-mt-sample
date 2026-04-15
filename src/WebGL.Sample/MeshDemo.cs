@@ -25,8 +25,8 @@ public class MeshDemo
 
 	public static async Task<MeshDemo> LoadAsync(GL gl)
 	{
-		var vertSource = new StreamReader(typeof(MeshDemo).GetTypeInfo().Assembly.GetManifestResourceStream("WebGL.Sample.Assets.Vert.glsl")).ReadToEnd();
-		var fragSource = new StreamReader(typeof(MeshDemo).GetTypeInfo().Assembly.GetManifestResourceStream("WebGL.Sample.Assets.Frag.glsl")).ReadToEnd();
+		var vertSource = await new StreamReader(typeof(MeshDemo).GetTypeInfo().Assembly.GetManifestResourceStream("WebGL.Sample.Assets.Vert.glsl")!).ReadToEndAsync();
+		var fragSource = await new StreamReader(typeof(MeshDemo).GetTypeInfo().Assembly.GetManifestResourceStream("WebGL.Sample.Assets.Frag.glsl")!).ReadToEndAsync();
 		return new MeshDemo(gl, vertSource, fragSource);
 	}
 
@@ -194,6 +194,7 @@ public class MeshDemo
 		for (int i = 0; i < count; i++)
 		{
 			LogoTranslation += deltaPerFrame;
+			await Task.Delay(20);
 		}
 		LogoTranslation = position;
 	}

@@ -18,6 +18,7 @@ public static class Test
 	{
 		ArgumentNullException.ThrowIfNull(Demo);
 
+		InputBridge.BeforeFrame();
 		Demo.Render();
 
 		return 1;
@@ -87,14 +88,12 @@ public static class Test
 
 		var gl = GL.GetApi(EGL.GetProcAddress);
 
-		Interop.Initialize();
+		Interop.Initialize(InputBridge.Initialize());
 
 		Demo = await MeshDemo.LoadAsync(gl);
-		Demo?.CanvasResized(1000, 1000);
 
 		unsafe
 		{
-			Console.WriteLine("RequestAnimationFrameLoop");
 			Emscripten.RequestAnimationFrameLoop((delegate* unmanaged<double, nint, int>)&Frame, nint.Zero);
 		}
 	}

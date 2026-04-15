@@ -1,160 +1,509 @@
 import { dotnet } from './_framework/dotnet.js'
 
 var canvas = globalThis.document.getElementById("canvas");
-canvas.width = 1000;
-canvas.height = 1000;
+let sharedInputMemoryPtr = 0;
 
-const { setModuleImports, getAssemblyExports, getConfig, runMain } = await dotnet
+const runtime = await dotnet
 	.withDiagnosticTracing(false)
 	.withApplicationArgumentsFromQuery()
 	.withModuleConfig({canvas: canvas})
 	.create();
 
-const config = getConfig();
-const exports = await getAssemblyExports(config.mainAssemblyName);
+const config = runtime.getConfig();
+const exports = await runtime.getAssemblyExports(config.mainAssemblyName);
 const interop = exports.WebGL.Sample.Interop;
 
-setModuleImports("main.js", {
-	initialize: () => {
+// ---------------------------------------------------------------
+// Input System Setup
+// ---------------------------------------------------------------
 
-		var checkCanvasResize = (dispatch) => {
-			var devicePixelRatio = window.devicePixelRatio || 1.0;
-			var displayWidth = canvas.clientWidth * devicePixelRatio;
-			var displayHeight = canvas.clientHeight * devicePixelRatio;
+// 布局常量 (需与 C# 严格一致)
+const STRUCT = {
+	HEADER_SIZE: 8, // ActiveIndex(4) + Padding(4)
+	// InputBuffer 偏移量:
+	OFF_CANVAS_WIDTH: 0,
+	OFF_CANVAS_HEIGHT: 4,
+	OFF_DEVICE_PIXEL_RATIO: 8,
+	OFF_MOUSE_POSITION_X: 16,
+	OFF_MOUSE_POSITION_Y: 20,
+	OFF_GP_AXES: 24,    // 16 floats
+	OFF_GP_TRIGGERS: 88, // 8 floats
+	OFF_USED_BYTES: 120,
+	OFF_EVENT_DATA: 124,
+	BUFFER_SIZE: 4220 // 一个 Buffer 的总大小，124 + 4096
+};
 
-			if (canvas.width != displayWidth || canvas.height != displayHeight) {
-				//canvas.width = displayWidth;
-				//canvas.height = displayHeight;
-				dispatch = true;
+let canvasWidth = 1;
+let canvasHeight = 1;
+let mousePositionX = 0;
+let mousePositionY = 0;
+
+// 手柄上一帧的按键状态掩码
+const lastGamepadBtnMasks = [0, 0, 0, 0];
+
+function getWritePtr(sharedInputView) {
+	const activeIndex = sharedInputView.getInt32(sharedInputMemoryPtr, true);
+	return sharedInputMemoryPtr + STRUCT.HEADER_SIZE + (activeIndex * STRUCT.BUFFER_SIZE);
+}
+
+// --- 写入 4字节事件 ---
+function writeSmallEvent(type, param = 0, payload = 0, dataView = null) {
+	// 这个 buffer 是一个 SharedArrayBuffer，因为指针可能会变，所以每次都要重新获取；另外，sharedInputMemoryPtr 不会变
+	dataView ??= new DataView(runtime.Module.wasmMemory.buffer);
+	const base = getWritePtr(dataView);
+	const usedBytesOffset = base + STRUCT.OFF_USED_BYTES;
+	const used = dataView.getInt32(usedBytesOffset, true);
+	const newUsed = used + 4;
+	if (newUsed > 4096) {
+		return;
+	}
+	const ptr = base + STRUCT.OFF_EVENT_DATA + used;
+	// 写入: Type(1) + Param(1) + Payload(2)
+	// DataView 没有 setInt8/16 这种混合写，直接写一个 Int32 最快
+	// 内存结构: [Type | Param | PayloadL | PayloadH] (Little Endian)
+	// Packed: Type | (Param << 8) | (Payload << 16)
+	const packed = (type & 0xFF) | ((param & 0xFF) << 8) | ((payload & 0xFFFF) << 16);
+	dataView.setInt32(ptr, packed, true);
+	dataView.setInt32(usedBytesOffset, newUsed, true);
+}
+
+// --- 写入 12字节事件 ---
+function writeLargeEvent(type, param = 0, payload = 0, x = 0, y = 0, dataView = null) {
+	dataView ??= new DataView(runtime.Module.wasmMemory.buffer);
+	const base = getWritePtr(dataView);
+	const usedBytesOffset = base + STRUCT.OFF_USED_BYTES;
+	const used = dataView.getInt32(usedBytesOffset, true);
+	const newUsed = used + 12;
+	if (newUsed > 4096) {
+		return;
+	}
+	const ptr = base + STRUCT.OFF_EVENT_DATA + used;
+	// 1. Header (4 bytes)
+	const packed = (type & 0xFF) | ((param & 0xFF) << 8) | ((payload & 0xFFFF) << 16);
+	dataView.setInt32(ptr, packed, true);
+	// 2. Floats (8 bytes)
+	dataView.setFloat32(ptr + 4, x, true);
+	dataView.setFloat32(ptr + 8, y, true);
+	dataView.setInt32(usedBytesOffset, newUsed, true);
+}
+
+function pollInputLoop() {
+	const dataView = new DataView(runtime.Module.wasmMemory.buffer);
+	const base = getWritePtr(dataView);
+	// 1. 写入公共状态
+	dataView.setFloat32(base + STRUCT.OFF_CANVAS_WIDTH, canvasWidth, true);
+	dataView.setFloat32(base + STRUCT.OFF_CANVAS_HEIGHT, canvasHeight, true);
+	dataView.setFloat32(base + STRUCT.OFF_DEVICE_PIXEL_RATIO, globalThis.devicePixelRatio, true);
+	dataView.setFloat32(base + STRUCT.OFF_MOUSE_POSITION_X, mousePositionX, true);
+	dataView.setFloat32(base + STRUCT.OFF_MOUSE_POSITION_Y, mousePositionY, true);
+	// 2. 手柄
+	const gamepads = globalThis.navigator.getGamepads();
+	for (let i = 0; i < gamepads.length; i++) {
+		const gamepad = gamepads[i];
+		if (!gamepad || !gamepad.connected || gamepad.mapping !== "standard") {
+			continue;
+		}
+		const gamepadIndex = gamepad.index;
+		if (gamepadIndex < 0 || gamepadIndex >= 4) {
+			continue;
+		}
+		// --- A. 写入摇杆和扳机状态 (Snapshot) ---
+		const axes = gamepad.axes;
+		for (let a = 0; a < 4; a++) {
+			dataView.setFloat32(base + STRUCT.OFF_GP_AXES + (gamepadIndex * 16) + (a * 4), axes[a], true);
+		}
+		const buttons = gamepad.buttons;
+		dataView.setFloat32(base + STRUCT.OFF_GP_TRIGGERS + (gamepadIndex * 8), buttons[6].value, true);
+		dataView.setFloat32(base + STRUCT.OFF_GP_TRIGGERS + (gamepadIndex * 8) + 4, buttons[7].value, true);
+		// --- B. 按键事件检测 ---
+		let currMask = 0;
+		// 跳过 6、7、16
+		for (let b = 0; b < 6; b++) {
+			if (buttons[b].pressed) {
+				currMask |= (1 << b);
 			}
-
-			//if (dispatch)
-				//interop.OnCanvasResize(displayWidth, displayHeight, devicePixelRatio);
 		}
-
-		function checkCanvasResizeFrame() {
-			checkCanvasResize(false);
-			requestAnimationFrame(checkCanvasResizeFrame);
+		for (let b = 8; b < 16; b++) {
+			if (buttons[b].pressed) {
+				currMask |= (1 << b);
+			}
 		}
+		const prevMask = lastGamepadBtnMasks[i];
+		const changes = currMask ^ prevMask; // 异或找出变化的位
+		if (changes !== 0) {
+			for (let b = 0; b < 6; b++) {
+				if ((changes & (1 << b)) !== 0) {
+					const isDown = (currMask & (1 << b)) !== 0;
+					writeSmallEvent(isDown ? 3 : 4, translateGamepadButtons(b), gamepadIndex, dataView);
+				}
+			}
+			for (let b = 8; b < 16; b++) {
+				if ((changes & (1 << b)) !== 0) {
+					const isDown = (currMask & (1 << b)) !== 0;
+					writeSmallEvent(isDown ? 3 : 4, translateGamepadButtons(b), gamepadIndex, dataView);
+				}
+			}
+			lastGamepadBtnMasks[i] = currMask;
+		}
+	}
+	globalThis.requestAnimationFrame(pollInputLoop);
+}
 
-		/*var keyDown = (e) => {
+function translateKeyCode(code) {
+	switch (code) {
+		case "ShiftLeft":
+		case "ShiftRight":
+			return 1;
+		case "ControlLeft":
+		case "ControlRight":
+			return 2;
+		case "F1":
+			return 3;
+		case "F2":
+			return 4;
+		case "F3":
+			return 5;
+		case "F4":
+			return 6;
+		case "F5":
+			return 7;
+		case "F6":
+			return 8;
+		case "F7":
+			return 9;
+		case "F8":
+			return 10;
+		case "F9":
+			return 11;
+		case "F10":
+			return 12;
+		case "F11":
+			return 13;
+		case "F12":
+			return 14;
+		case "ArrowLeft":
+			return 15;
+		case "ArrowRight":
+			return 16;
+		case "ArrowUp":
+			return 17;
+		case "ArrowDown":
+			return 18;
+		case "Enter":
+		case "NumpadEnter":
+			return 19;
+		case "Escape":
+			return 20;
+		case "Space":
+			return 21;
+		case "Tab":
+			return 22;
+		case "Backspace":
+			return 23;
+		case "Insert":
+			return 24;
+		case "Delete":
+			return 25;
+		case "PageUp":
+			return 26;
+		case "PageDown":
+			return 27;
+		case "Home":
+			return 28;
+		case "End":
+			return 29;
+		case "CapsLock":
+			return 30;
+		case "KeyA":
+			return 31;
+		case "KeyB":
+			return 32;
+		case "KeyC":
+			return 33;
+		case "KeyD":
+			return 34;
+		case "KeyE":
+			return 35;
+		case "KeyF":
+			return 36;
+		case "KeyG":
+			return 37;
+		case "KeyH":
+			return 38;
+		case "KeyI":
+			return 39;
+		case "KeyJ":
+			return 40;
+		case "KeyK":
+			return 41;
+		case "KeyL":
+			return 42;
+		case "KeyM":
+			return 43;
+		case "KeyN":
+			return 44;
+		case "KeyO":
+			return 45;
+		case "KeyP":
+			return 46;
+		case "KeyQ":
+			return 47;
+		case "KeyR":
+			return 48;
+		case "KeyS":
+			return 49;
+		case "KeyT":
+			return 50;
+		case "KeyU":
+			return 51;
+		case "KeyV":
+			return 52;
+		case "KeyW":
+			return 53;
+		case "KeyX":
+			return 54;
+		case "KeyY":
+			return 55;
+		case "KeyZ":
+			return 56;
+		case "Numpad0":
+		case "Digit0":
+			return 57;
+		case "Numpad1":
+		case "Digit1":
+			return 58;
+		case "Numpad2":
+		case "Digit2":
+			return 59;
+		case "Numpad3":
+		case "Digit3":
+			return 60;
+		case "Numpad4":
+		case "Digit4":
+			return 61;
+		case "Numpad5":
+		case "Digit5":
+			return 62;
+		case "Numpad6":
+		case "Digit6":
+			return 63;
+		case "Numpad7":
+		case "Digit7":
+			return 64;
+		case "Numpad8":
+		case "Digit8":
+			return 65;
+		case "Numpad9":
+		case "Digit9":
+			return 66;
+		case "Backquote":
+			return 67;
+		case "Minus":
+		case "NumpadSubtract":
+			return 68;
+		case "Equal":
+		case "NumpadAdd":
+			return 69;
+		case "BracketLeft":
+			return 70;
+		case "BracketRight":
+			return 71;
+		case "Semicolon":
+			return 72;
+		case "Quote":
+			return 73;
+		case "Comma":
+			return 74;
+		case "Period":
+		case "NumpadDecimal":
+			return 75;
+		case "Slash":
+		case "NumpadDivide":
+			return 76;
+		case "AltLeft":
+		case "AltRight":
+			return 77;
+		case "Backslash":
+			return 78;
+		default:
+			return -1;
+	}
+}
+
+function translateMouseButton(button) {
+	switch (button) {
+		case 1:
+			return 2;
+		case 2:
+			return 1;
+		default:
+			return button;
+	}
+}
+
+function translateGamepadButtons(button) {
+	switch (button) {
+		case 0:
+			return 0;
+		case 1:
+			return 1;
+		case 2:
+			return 2;
+		case 3:
+			return 3;
+		case 4:
+			return 8;
+		case 5:
+			return 9;
+		case 8:
+			return 4;
+		case 9:
+			return 5;
+		case 10:
+			return 6;
+		case 11:
+			return 7;
+		case 12:
+			return 11;
+		case 13:
+			return 13;
+		case 14:
+			return 10;
+		case 15:
+			return 12;
+		default:
+			return -1;
+	}
+}
+
+runtime.setModuleImports("main.js", {
+	initialize: inputPtr => {
+		sharedInputMemoryPtr = inputPtr;
+
+		const observer = new ResizeObserver(entries => {
+			const entry = entries[0];
+			const devicePixelRatio = globalThis.devicePixelRatio || 1.0;
+			// 注意：这里我们测量的是 DOM 元素的显示尺寸
+			if (entry.devicePixelContentBoxSize) {
+				// 如果浏览器支持直接获取物理像素尺寸
+				canvasWidth = entry.devicePixelContentBoxSize[0].inlineSize;
+				canvasHeight = entry.devicePixelContentBoxSize[0].blockSize;
+			} else {
+				// 降级方案
+				const rect = canvas.getBoundingClientRect();
+				canvasWidth = Math.round(rect.width * devicePixelRatio);
+				canvasHeight = Math.round(rect.height * devicePixelRatio);
+			}
+			const runningWorkers = runtime.Module.PThread?.runningWorkers;
+			if (runningWorkers && runningWorkers.length > 0) {
+				runningWorkers[0].postMessage({
+					cmd: 'resize_canvas',
+					width: canvasWidth,
+					height: canvasHeight
+				});
+			}
+		});
+		observer.observe(canvas);
+
+		const keyDown = e => {
 			e.stopPropagation();
-			var shift = e.shiftKey;
-			var ctrl = e.ctrlKey;
-			var alt = e.altKey;
-			var repeat = e.repeat;
-			var code = e.keyCode;
-
-			interop.OnKeyDown(shift, ctrl, alt, repeat, code);
+			let translatedKeyCode = translateKeyCode(e.code);
+			if (translatedKeyCode >= 0) {
+				writeSmallEvent(1, translatedKeyCode, e.key.length === 1 ? e.key.charCodeAt(0) : 0);
+			}
 		}
 
-		var keyUp = (e) => {
+		const keyUp = e => {
 			e.stopPropagation();
-			var shift = e.shiftKey;
-			var ctrl = e.ctrlKey;
-			var alt = e.altKey;
-			var code = e.keyCode;
-
-			interop.OnKeyUp(shift, ctrl, alt, code);
+			let translatedKeyCode = translateKeyCode(e.code);
+			if (translatedKeyCode >= 0) {
+				writeSmallEvent(2, translatedKeyCode);
+			}
 		}
 
-		var mouseMove = (e) => {
-			var x = e.offsetX;
-			var y = e.offsetY;
-			interop.OnMouseMove(x, y);
-		}
-
-		var mouseDown = (e) => {
-			var shift = e.shiftKey;
-			var ctrl = e.ctrlKey;
-			var alt = e.altKey;
-			var button = e.button;
-
-			interop.OnMouseDown(shift, ctrl, alt, button);
-		}
-
-		var mouseUp = (e) => {
-			var shift = e.shiftKey;
-			var ctrl = e.ctrlKey;
-			var alt = e.altKey;
-			var button = e.button;
-
-			interop.OnMouseUp(shift, ctrl, alt, button);
-		}
-
-		var shouldIgnore = (e) => {
+		const pointerDown = e => {
 			e.preventDefault();
-			return e.touches.length > 1 || e.type == "touchend" && e.touches.length > 0;
+			e.stopPropagation();
+			canvas.focus();
+			const devicePixelRatio = globalThis.devicePixelRatio || 1.0;
+			switch (e.pointerType) {
+				case "mouse":
+				case "pen":
+					writeLargeEvent(128, translateMouseButton(e.button), 0, e.offsetX * devicePixelRatio, e.offsetY * devicePixelRatio);
+					break;
+				case "touch":
+					writeLargeEvent(132, e.pointerId % 10, 0, e.offsetX * devicePixelRatio, e.offsetY * devicePixelRatio);
+					break;
+			}
 		}
 
-		var touchStart = (e) => {
-			if (shouldIgnore(e))
-				return;
-
-			var shift = e.shiftKey;
-			var ctrl = e.ctrlKey;
-			var alt = e.altKey;
-			var button = 0;
-			var touch = e.changedTouches[0];
-			var bcr = e.target.getBoundingClientRect();
-			var x = touch.clientX - bcr.x;
-			var y = touch.clientY - bcr.y;
-
-			interop.OnMouseMove(x, y);
-			interop.OnMouseDown(shift, ctrl, alt, button);
+		const pointerMove = e => {
+			e.preventDefault();
+			e.stopPropagation();
+			const devicePixelRatio = globalThis.devicePixelRatio || 1.0;
+			switch (e.pointerType) {
+				case "mouse":
+				case "pen":
+					mousePositionX = e.offsetX * devicePixelRatio;
+					mousePositionY = e.offsetY * devicePixelRatio;
+					writeLargeEvent(130, 0, 0, e.movementX, e.movementY);
+					break;
+				case "touch":
+					writeLargeEvent(134, e.pointerId % 10, 0, e.offsetX * devicePixelRatio, e.offsetY * devicePixelRatio);
+					break
+			}
 		}
 
-		var touchMove = (e) => {
-			if (shouldIgnore(e))
-				return;
-
-			var touch = e.changedTouches[0];
-			var bcr = e.target.getBoundingClientRect();
-			var x = touch.clientX - bcr.x;
-			var y = touch.clientY - bcr.y;
-
-			interop.OnMouseMove(x, y);
+		const pointerUp = e => {
+			e.preventDefault();
+			e.stopPropagation();
+			switch (e.pointerType) {
+				case "mouse":
+				case "pen":
+					writeLargeEvent(129, translateMouseButton(e.button), 0, e.offsetX * devicePixelRatio, e.offsetY * devicePixelRatio);
+					break;
+				case "touch":
+					writeLargeEvent(133, e.pointerId % 10, 0, e.offsetX * devicePixelRatio, e.offsetY * devicePixelRatio);
+					break;
+			}
 		}
 
-		var touchEnd = (e) => {
-			if (shouldIgnore(e))
-				return;
-
-			var shift = e.shiftKey;
-			var ctrl = e.ctrlKey;
-			var alt = e.altKey;
-			var button = 0;
-			var touch = e.changedTouches[0];
-			var bcr = e.target.getBoundingClientRect();
-			var x = touch.clientX - bcr.x;
-			var y = touch.clientY - bcr.y;
-
-			interop.OnMouseMove(x, y);
-			interop.OnMouseUp(shift, ctrl, alt, button);
+		const mouseWheel = e => {
+			e.preventDefault();
+			e.stopPropagation();
+			writeLargeEvent(131, 0, 0, e.deltaX / 100, e.deltaY / 100);
 		}
 
-		//canvas.addEventListener("contextmenu", (e) => e.preventDefault(), false);
+		const gamepadConnected = e => {
+			let gamepad = e.gamepad;
+			if (gamepad !== null && gamepad.index >= 0 && gamepad.index < 4) {
+				// id 是字符串，所以还是走 interop
+				interop.OnGamepadConnected(gamepad.index, gamepad.id);
+			}
+		}
+
+		const gamepadDisconnected = e => {
+			let gamepad = e.gamepad;
+			if (gamepad !== null && gamepad.index >= 0 && gamepad.index < 4) {
+				lastGamepadBtnMasks[gamepad.index] = 0;
+				writeSmallEvent(6, 0, gamepad.index);
+			}
+		}
+
+		canvas.addEventListener("contextmenu", e => e.preventDefault(), false);
 		canvas.addEventListener("keydown", keyDown, false);
 		canvas.addEventListener("keyup", keyUp, false);
-		canvas.addEventListener("mousemove", mouseMove, false);
-		canvas.addEventListener("mousedown", mouseDown, false);
-		canvas.addEventListener("mouseup", mouseUp, false);
-		canvas.addEventListener("touchstart", touchStart, false);
-		canvas.addEventListener("touchmove", touchMove, false);
-		canvas.addEventListener("touchend", touchEnd, false);*/
-		checkCanvasResize(true);
-		checkCanvasResizeFrame();
+		canvas.addEventListener("pointerdown", pointerDown, false);
+		canvas.addEventListener("pointermove", pointerMove, false);
+		canvas.addEventListener("pointerup", pointerUp, false);
+		canvas.addEventListener("wheel", mouseWheel, false);
+		globalThis.addEventListener("gamepadconnected", gamepadConnected, false);
+		globalThis.addEventListener("gamepaddisconnected", gamepadDisconnected, false);
+		canvas.addEventListener("dragover", e => e.preventDefault(), false);
 
 		canvas.tabIndex = 1000;
+		canvas.focus();
+		pollInputLoop();
+}});
 
-		//interop.SetRootUri(window.location.toString());
-
-		/*var langs = navigator.languages || [];
-		for (var i = 0; i < langs.length; i++)
-			interop.AddLocale(langs[i]);
-		interop.AddLocale(navigator.language);
-		interop.AddLocale(navigator.userLanguage);*/
-	}
-});
-
-await runMain();
+await runtime.runMain();
