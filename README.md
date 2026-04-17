@@ -2,4 +2,4 @@
 
 This is a minimum viable product for running WebGL, using dotnet's WebAssembly and Silk's OpenGLES bindings with emscripten in multi-thread.
 
-Thanks to WaveEngine/@emepetres's wasm sample projects for help and original samples and references.
+The original repository without multi-thread is [https://github.com/AshleighAdams/dotnet-webgl-sample](https://github.com/AshleighAdams/dotnet-webgl-sample)
